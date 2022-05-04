@@ -4,8 +4,85 @@
 #include "user.h"
 #include "x86.h"
 
+#define MAX_PROC 64
+#define PGSIZE 4096
+
+struct ptr_struct {
+  int busy; //whether in use or not
+  void *ptr;
+  void *stack;
+};
+
+struct ptr_struct ptrs[MAX_PROC];
+
+static inline int fetch_and_add(int *var, int val) {   
+    __asm__ volatile
+    ("lock; xaddl %0, %1"
+	: "+r" (val),  "+m" (*var) // input + output
+	: // No input
+	: "memory"
+    );
+    return val;
+}
+
+void lock_init(lock_t *lock)
+{
+  lock->ticket = 0;
+  lock->turn = 0;
+}
+
+void lock_acquire(lock_t *lock)
+{
+  int turn = fetch_and_add(&lock->ticket, 1);
+  while(lock->turn != turn) //spin lock
+  {}
+}
+
+void lock_release(lock_t *lock)
+{
+  lock->turn = lock->turn + 1;
+}
+
+int thread_create(void (*start_routine)(void*, void*), void* arg1, void* arg2)
+{
+  void* freeptr = malloc(PGSIZE*2);
+  void* stack;
+  if(freeptr == 0)
+    return -1;
+  if((uint)freeptr % PGSIZE == 0)
+    stack = freeptr;
+  else
+    stack = freeptr + (PGSIZE - ((uint)freeptr % PGSIZE));
+  for(int i = 0; i < MAX_PROC; i++){
+    if(ptrs[i].busy == 0){
+      ptrs[i].ptr = freeptr;
+      ptrs[i].stack = stack;
+      ptrs[i].busy = 1;
+      break;
+    }
+  }
+  int ret = clone(start_routine, arg1, arg2, stack);
+  return ret;
+}
+
+int thread_join()
+{
+  void* stack;
+  int ret = join(&stack);
+  for(int i = 0; i < MAX_PROC; i++){
+    if(ptrs[i].busy == 1 && ptrs[i].stack == stack){
+      free(ptrs[i].ptr);
+      ptrs[i].stack = NULL;
+      ptrs[i].busy = 0;
+      ptrs[i].ptr = NULL;
+      break;
+    }
+  }
+  return ret;
+}
+
 char*
-strcpy(char *s, const char *t)
+strcpy(char *s, char *t)
 {
   char *os;
 
@@ -24,7 +101,7 @@ strcmp(const char *p, const char *q)
 }
 
 uint
-strlen(const char *s)
+strlen(char *s)
 {
   int n;
 
@@ -68,7 +145,7 @@ gets(char *buf, int max)
 }
 
 int
-stat(const char *n, struct stat *st)
+stat(char *n, struct stat *st)
 {
   int fd;
   int r;
@@ -93,11 +170,10 @@ atoi(const char *s)
 }
 
 void*
-memmove(void *vdst, const void *vsrc, int n)
+memmove(void *vdst, void *vsrc, int n)
 {
-  char *dst;
-  const char *src;
-
+  char *dst, *src;
+  
   dst = vdst;
   src = vsrc;
   while(n-- > 0)
